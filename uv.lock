@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "async-redis-rate-limiters"
-version = "0.0.0.post1.dev0+cf945b0"
+version = "0.0.0.post2.dev0+441ea48"
 source = { virtual = "." }
 dependencies = [
     { name = "redis" },
