@@ -1,0 +1,32 @@
+[project]
+name = "async-redis-rate-limiters"
+version = "0.0.0.post1.dev0+cf945b0"
+description = "Rock solid async python generic distributed rate limiters (concurrency and time) backed by Redis."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["redis>=6.2.0", "stlog>=0.5.0", "tenacity>=9.1.2"]
+
+[tool.setuptools]
+packages = ["async_redis_rate_limiters"]
+
+[tool.setuptools.package-data]
+async_redis_rate_limiters = ["lua/*.lua"]
+
+[project.urls]
+Homepage = "https://github.com/fabien-marty/async-redis-rate-limiters"
+Repository = "https://github.com/fabien-marty/async-redis-rate-limiters.git"
+
+
+[dependency-groups]
+dev = [
+    "dunamai>=1.25.0",
+    "jinja-tree>=0.7.4",
+    "mypy>=1.17.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+    "ruff>=0.12.5",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
