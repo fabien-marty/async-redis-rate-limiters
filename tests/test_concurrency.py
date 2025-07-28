@@ -22,3 +22,22 @@ async def test_basic():
     semaphore = manager.get_semaphore("test", 2)
     tasks = [asyncio.create_task(_worker(semaphore, shared)) for _ in range(100)]
     await asyncio.gather(*tasks)
+
+
+async def test_memory_backend():
+    shared = {"counter": 0}
+
+    async def _worker(semaphore: AsyncContextManager, shared: dict):
+        async with semaphore:
+            shared["counter"] += 1
+            if shared["counter"] > 2:
+                raise Exception("Concurrent limit exceeded")
+            await asyncio.sleep(0.001)
+            shared["counter"] -= 1
+
+    manager = DistributedSemaphoreManager(
+        backend="memory",
+    )
+    semaphore = manager.get_semaphore("test", 2)
+    tasks = [asyncio.create_task(_worker(semaphore, shared)) for _ in range(100)]
+    await asyncio.gather(*tasks)

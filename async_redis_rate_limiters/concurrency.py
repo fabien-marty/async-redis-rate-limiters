@@ -1,120 +1,18 @@
 import asyncio
-from dataclasses import dataclass
-import time
-from typing import AsyncContextManager
-import uuid
+from dataclasses import dataclass, field
+from typing import AsyncContextManager, Literal
 
-from async_redis_rate_limiters.lua import ACQUIRE_LUA_SCRIPT, RELEASE_LUA_SCRIPT
+from async_redis_rate_limiters.adapters.redis import _RedisDistributedSemaphore
 from async_redis_rate_limiters.pool import RedisConnectionPool
-from tenacity import (
-    AsyncRetrying,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
-
-
-@dataclass(kw_only=True)
-class _RedisDistributedSemaphore:
-    namespace: str
-    redis_url: str
-    key: str
-    value: int
-    ttl: int
-
-    redis_number_of_attempts: int = 3
-    redis_retry_min_delay: float = 1
-    redis_retry_multiplier: float = 2
-    redis_retry_max_delay: float = 60
-
-    _pool_acquire: RedisConnectionPool
-    _pool_release: RedisConnectionPool
-    _pool_pubsub: RedisConnectionPool
-    _blocking_wait_time: int = 10
-    __client_id: str | None = None
-
-    def _get_channel(self) -> str:
-        return f"{self.namespace}:rate_limiter:channel:{self.key}"
-
-    def _get_zset_key(self) -> str:
-        return f"{self.namespace}:rate_limiter:zset:{self.key}"
-
-    def _async_retrying(self) -> AsyncRetrying:
-        return AsyncRetrying(
-            stop=stop_after_attempt(self.redis_number_of_attempts),
-            wait=wait_exponential(
-                multiplier=self.redis_retry_multiplier,
-                min=self.redis_retry_min_delay,
-                max=self.redis_retry_max_delay,
-            ),
-            retry=retry_if_exception_type(),
-            reraise=True,
-        )
-
-    async def __aenter__(self) -> None:
-        if self.__client_id is not None:
-            raise RuntimeError(
-                "Semaphore already acquired (in the past) => don't reuse the same semaphore instance"
-            )
-        client_id = str(uuid.uuid4()).replace("-", "")
-        async for attempt in self._async_retrying():
-            with attempt:
-                async with await self._pool_acquire.context_manager() as client:
-                    acquire_script = client.register_script(ACQUIRE_LUA_SCRIPT)
-                    async with (
-                        await self._pool_pubsub.context_manager() as pubsub_client
-                    ):
-                        async with pubsub_client.pubsub() as pubsub:
-                            # Subscribe to the channel
-                            await pubsub.subscribe(self._get_channel())
-
-                            # Try to get the lock
-                            while True:
-                                now = time.time()
-                                acquired = await acquire_script(
-                                    keys=[self._get_zset_key()],
-                                    args=[
-                                        self._get_channel(),
-                                        client_id,
-                                        self.value,
-                                        self.ttl,
-                                        now,
-                                    ],
-                                )
-                                if acquired == 1:
-                                    self.__client_id = client_id
-                                    await pubsub.unsubscribe(self._get_channel())
-                                    return None
-
-                                # Wait for notification using pubsub
-                                try:
-                                    await asyncio.wait_for(
-                                        pubsub.get_message(
-                                            timeout=self._blocking_wait_time
-                                        ),
-                                        timeout=self._blocking_wait_time,
-                                    )
-                                except asyncio.TimeoutError:
-                                    # Timeout reached, continue to retry acquisition
-                                    pass
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        assert self.__client_id is not None
-        async for attempt in self._async_retrying():
-            with attempt:
-                async with await self._pool_release.context_manager() as client:
-                    release_script = client.register_script(RELEASE_LUA_SCRIPT)
-                    await release_script(
-                        keys=[self._get_zset_key()],
-                        args=[self._get_channel(), self.__client_id, self.ttl],
-                    )
-        return
 
 
 @dataclass
 class DistributedSemaphoreManager:
     namespace: str = "default"
     """Namespace for the semaphore."""
+
+    backend: Literal["redis", "memory"] = "redis"
+    """Backend to use 'redis' (default) or 'memory' (not distributed, only for testing)."""
 
     redis_url: str = "redis://localhost:6379"
     """Redis connection URL (e.g., "redis://localhost:6379")."""
@@ -144,9 +42,15 @@ class DistributedSemaphoreManager:
     """Maximum delay between Redis operations (seconds)."""
 
     __blocking_wait_time: int = 10
-    __pool_acquire: RedisConnectionPool | None = None
-    __pool_pubsub: RedisConnectionPool | None = None
-    __pool_release: RedisConnectionPool | None = None
+    __redis_pool_acquire: RedisConnectionPool | None = None
+    __redis_pool_pubsub: RedisConnectionPool | None = None
+    __redis_pool_release: RedisConnectionPool | None = None
+
+    # only for memory backend
+    # key -> (semaphore, value)
+    __memory_semaphores: dict[str, tuple[asyncio.Semaphore, int]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self):
         if self.redis_max_connections < 3:
@@ -166,24 +70,23 @@ class DistributedSemaphoreManager:
 
     @property
     def _pool_acquire(self) -> RedisConnectionPool:
-        if self.__pool_acquire is None:
-            self.__pool_acquire = self._make_redis_pool()
-        return self.__pool_acquire
+        if self.__redis_pool_acquire is None:
+            self.__redis_pool_acquire = self._make_redis_pool()
+        return self.__redis_pool_acquire
 
     @property
     def _pool_release(self) -> RedisConnectionPool:
-        if self.__pool_release is None:
-            self.__pool_release = self._make_redis_pool()
-        return self.__pool_release
+        if self.__redis_pool_release is None:
+            self.__redis_pool_release = self._make_redis_pool()
+        return self.__redis_pool_release
 
     @property
     def _pool_pubsub(self) -> RedisConnectionPool:
-        if self.__pool_pubsub is None:
-            self.__pool_pubsub = self._make_redis_pool()
-        return self.__pool_pubsub
+        if self.__redis_pool_pubsub is None:
+            self.__redis_pool_pubsub = self._make_redis_pool()
+        return self.__redis_pool_pubsub
 
-    def get_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
-        """Get a distributed semaphore for the given key (with the given value)."""
+    def _get_redis_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
         return _RedisDistributedSemaphore(
             namespace=self.namespace,
             redis_url=self.redis_url,
@@ -197,5 +100,23 @@ class DistributedSemaphoreManager:
             _pool_acquire=self._pool_acquire,
             _pool_release=self._pool_release,
             _pool_pubsub=self._pool_pubsub,
-            _blocking_wait_time=self.__blocking_wait_time,
+            _max_wait_time=self.__blocking_wait_time,
         )
+
+    def _get_memory_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
+        if key not in self.__memory_semaphores:
+            self.__memory_semaphores[key] = (asyncio.Semaphore(value), value)
+        semaphore, stored_value = self.__memory_semaphores[key]
+        if stored_value != value:
+            raise Exception(
+                "you can't change the value of a semaphore after it has been created (for the same key)"
+            )
+        return semaphore
+
+    def get_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
+        """Get a distributed semaphore for the given key (with the given value)."""
+        if self.backend == "redis":
+            return self._get_redis_semaphore(key, value)
+        elif self.backend == "memory":
+            return self._get_memory_semaphore(key, value)
+        raise ValueError(f"Invalid backend: {self.backend}")
