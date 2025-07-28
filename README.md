@@ -15,7 +15,9 @@ Rock solid async python generic distributed rate limiters (concurrency and time)
 
 - ✅ Support very high concurrency (>100K), keep a reasonable number of connections to Redis (default: 300)
 - ✅ Rock solid with Redis/Network failures (multiple attempts, exponential backoff, etc.)
+    - you can restart the Redis server during the execution without any exception or losing any semaphore! *(of course, if persistence is setup in the redis instance)*
 - ✅ Very high performances with almost no polling at all
+- ✅ Memory backend (for testing)
 
 ## Non-features
 
@@ -58,6 +60,20 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
+```
+
+<details>
+
+<summary>What about if you want to use the memory backend?</summary>
+
+**WARNING: the memory backend is just a wrapper on a classic `asyncio.Semaphore`, it is not "distributed" at all!**
+
+```python
+manager = DistributedSemaphoreManager(
+    backend = "memory"
+)
+
+# and use it classically
 ```
 
 ## Dev
