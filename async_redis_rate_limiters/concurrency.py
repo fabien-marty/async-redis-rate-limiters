@@ -47,8 +47,8 @@ class DistributedSemaphoreManager:
     __redis_pool_release: RedisConnectionPool | None = None
 
     # only for memory backend
-    # key -> (semaphore, value)
-    __memory_semaphores: dict[str, tuple[asyncio.Semaphore, int]] = field(
+    # (namespace, key) -> (semaphore, value)
+    __memory_semaphores: dict[tuple[str, str], tuple[asyncio.Semaphore, int]] = field(
         default_factory=dict
     )
 
@@ -104,9 +104,12 @@ class DistributedSemaphoreManager:
         )
 
     def _get_memory_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
-        if key not in self.__memory_semaphores:
-            self.__memory_semaphores[key] = (asyncio.Semaphore(value), value)
-        semaphore, stored_value = self.__memory_semaphores[key]
+        if (self.namespace, key) not in self.__memory_semaphores:
+            self.__memory_semaphores[(self.namespace, key)] = (
+                asyncio.Semaphore(value),
+                value,
+            )
+        semaphore, stored_value = self.__memory_semaphores[(self.namespace, key)]
         if stored_value != value:
             raise Exception(
                 "you can't change the value of a semaphore after it has been created (for the same key)"
