@@ -1,15 +1,16 @@
 import asyncio
-from typing import AsyncContextManager
 from async_redis_rate_limiters.concurrency import DistributedSemaphoreManager
 
 
 async def test_basic():
     shared = {"counter": 0}
 
-    async def _worker(semaphore: AsyncContextManager, shared: dict):
-        async with semaphore:
+    async def _worker(
+        manager: DistributedSemaphoreManager, key: str, value: int, shared: dict
+    ):
+        async with manager.get_semaphore(key, value):
             shared["counter"] += 1
-            if shared["counter"] > 2:
+            if shared["counter"] > value:
                 raise Exception("Concurrent limit exceeded")
             await asyncio.sleep(0.001)
             shared["counter"] -= 1
@@ -19,16 +20,19 @@ async def test_basic():
         redis_max_connections=10,
         redis_ttl=10,
     )
-    semaphore = manager.get_semaphore("test", 2)
-    tasks = [asyncio.create_task(_worker(semaphore, shared)) for _ in range(100)]
+    tasks = [
+        asyncio.create_task(_worker(manager, "test", 2, shared)) for _ in range(1000)
+    ]
     await asyncio.gather(*tasks)
 
 
 async def test_memory_backend():
     shared = {"counter": 0}
 
-    async def _worker(semaphore: AsyncContextManager, shared: dict):
-        async with semaphore:
+    async def _worker(
+        manager: DistributedSemaphoreManager, key: str, value: int, shared: dict
+    ):
+        async with manager.get_semaphore(key, value):
             shared["counter"] += 1
             if shared["counter"] > 2:
                 raise Exception("Concurrent limit exceeded")
@@ -38,6 +42,7 @@ async def test_memory_backend():
     manager = DistributedSemaphoreManager(
         backend="memory",
     )
-    semaphore = manager.get_semaphore("test", 2)
-    tasks = [asyncio.create_task(_worker(semaphore, shared)) for _ in range(100)]
+    tasks = [
+        asyncio.create_task(_worker(manager, "test", 2, shared)) for _ in range(1000)
+    ]
     await asyncio.gather(*tasks)
