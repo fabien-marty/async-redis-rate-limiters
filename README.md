@@ -85,3 +85,5 @@ manager = DistributedSemaphoreManager(
 - Run the tests:
 
 `make test`
+
+note: you need a redis instance listening to localhost:6379
