@@ -30,6 +30,7 @@ class _RedisDistributedSemaphore:
     _pool_pubsub: RedisConnectionPool
     _max_wait_time: int
     __client_id: str | None = None
+    __entered: bool = False
 
     def _get_channel(self) -> str:
         return f"{self.namespace}:rate_limiter:channel:{self.key}"
@@ -50,10 +51,31 @@ class _RedisDistributedSemaphore:
         )
 
     async def __aenter__(self) -> None:
-        if self.__client_id is not None:
+        if self.__entered:
+            print("""BAD USAGE:
+DON'T DO THIS:
+                  
+semaphore = manager.get_semaphore("test", 1)
+                  
+...
+                  
+with semaphore:
+    # protected code
+                  
+
+BUT DO THIS INSTEAD:
+                  
+manager = DistributedSemaphoreManager(...) # the manager object should be shared
+                  
+...
+                  
+with manager.get_semaphore("test", 1):
+    # protected code
+""")
             raise RuntimeError(
-                "Semaphore already acquired (in the past) => don't reuse the same semaphore instance"
+                "Semaphore already acquired (in the past) => don't reuse the output of get_semaphore()"
             )
+        self.__entered = True
         client_id = str(uuid.uuid4()).replace("-", "")
         async for attempt in self._async_retrying():
             with attempt:
@@ -97,4 +119,3 @@ class _RedisDistributedSemaphore:
                         keys=[self._get_zset_key()],
                         args=[self._get_channel(), self.__client_id, self.ttl],
                     )
-        return
