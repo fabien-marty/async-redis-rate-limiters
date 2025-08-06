@@ -1,9 +1,14 @@
 import asyncio
 from dataclasses import dataclass, field
-from typing import AsyncContextManager, Literal
+from typing import Any, AsyncContextManager, Literal
+
+from redis.asyncio import BlockingConnectionPool
 
 from async_redis_rate_limiters.adapters.redis import _RedisDistributedSemaphore
-from async_redis_rate_limiters.pool import RedisConnectionPool
+
+from redis.asyncio import Redis
+
+from async_redis_rate_limiters.lua import ACQUIRE_LUA_SCRIPT, RELEASE_LUA_SCRIPT
 
 
 @dataclass
@@ -18,7 +23,7 @@ class DistributedSemaphoreManager:
     """Redis connection URL (e.g., "redis://localhost:6379")."""
 
     redis_ttl: int = 310
-    """Redis connection time to live (seconds)."""
+    """Semaphore max duration (seconds), only for redis backend."""
 
     redis_max_connections: int = 300
     """Redis maximum number of connections."""
@@ -42,9 +47,12 @@ class DistributedSemaphoreManager:
     """Maximum delay between Redis operations (seconds)."""
 
     __blocking_wait_time: int = 10
-    __redis_pool_acquire: RedisConnectionPool | None = None
-    __redis_pool_pubsub: RedisConnectionPool | None = None
-    __redis_pool_release: RedisConnectionPool | None = None
+    __acquire_pool: BlockingConnectionPool | None = None
+    __release_pool: BlockingConnectionPool | None = None
+    __acquire_client: Redis | None = None
+    __release_client: Redis | None = None
+    __acquire_script: Any = None
+    __release_script: Any = None
 
     # only for memory backend
     # (namespace, key) -> (semaphore, value)
@@ -53,40 +61,40 @@ class DistributedSemaphoreManager:
     )
 
     def __post_init__(self):
-        if self.redis_max_connections < 3:
-            raise ValueError("redis_max_connections must be at least 3")
+        if self.redis_max_connections < 2:
+            raise ValueError("redis_max_connections must be at least 2")
         if self.redis_socket_timeout <= self.__blocking_wait_time:
             raise ValueError(
                 "redis_socket_timeout must be greater than _blocking_wait_time"
             )
-
-    def _make_redis_pool(self) -> RedisConnectionPool:
-        return RedisConnectionPool(
-            redis_url=self.redis_url,
-            max_connections=self.redis_max_connections // 3,
+        Redis()
+        self.__acquire_pool = BlockingConnectionPool.from_url(
+            self.redis_url,
+            max_connections=self.redis_max_connections // 2,
+            timeout=None,
+            retry_on_timeout=False,
+            retry_on_error=False,
+            health_check_interval=10,
             socket_connect_timeout=self.redis_socket_connect_timeout,
             socket_timeout=self.redis_socket_timeout,
         )
-
-    @property
-    def _pool_acquire(self) -> RedisConnectionPool:
-        if self.__redis_pool_acquire is None:
-            self.__redis_pool_acquire = self._make_redis_pool()
-        return self.__redis_pool_acquire
-
-    @property
-    def _pool_release(self) -> RedisConnectionPool:
-        if self.__redis_pool_release is None:
-            self.__redis_pool_release = self._make_redis_pool()
-        return self.__redis_pool_release
-
-    @property
-    def _pool_pubsub(self) -> RedisConnectionPool:
-        if self.__redis_pool_pubsub is None:
-            self.__redis_pool_pubsub = self._make_redis_pool()
-        return self.__redis_pool_pubsub
+        self.__release_pool = BlockingConnectionPool.from_url(
+            self.redis_url,
+            max_connections=self.redis_max_connections // 2,
+            timeout=None,
+        )
+        self.__acquire_client = Redis.from_pool(self.__acquire_pool)
+        self.__release_client = Redis.from_pool(self.__release_pool)
+        self.__acquire_script = self.__acquire_client.register_script(
+            ACQUIRE_LUA_SCRIPT
+        )
+        self.__release_script = self.__release_client.register_script(
+            RELEASE_LUA_SCRIPT
+        )
 
     def _get_redis_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
+        assert self.__acquire_client is not None
+        assert self.__release_client is not None
         return _RedisDistributedSemaphore(
             namespace=self.namespace,
             redis_url=self.redis_url,
@@ -97,10 +105,10 @@ class DistributedSemaphoreManager:
             redis_retry_min_delay=self.redis_retry_min_delay,
             redis_retry_multiplier=self.redis_retry_multiplier,
             redis_retry_max_delay=self.redis_retry_max_delay,
-            _pool_acquire=self._pool_acquire,
-            _pool_release=self._pool_release,
-            _pool_pubsub=self._pool_pubsub,
-            _max_wait_time=self.__blocking_wait_time,
+            _acquire_client=self.__acquire_client,
+            _release_client=self.__release_client,
+            _acquire_script=self.__acquire_script,
+            _release_script=self.__release_script,
         )
 
     def _get_memory_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
