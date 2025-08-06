@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 import time
+from typing import Any
 import uuid
 
-from async_redis_rate_limiters.lua import ACQUIRE_LUA_SCRIPT, RELEASE_LUA_SCRIPT
-from async_redis_rate_limiters.pool import RedisConnectionPool
+from redis.asyncio import Redis
+
 from tenacity import (
     AsyncRetrying,
     stop_after_attempt,
@@ -25,15 +26,17 @@ class _RedisDistributedSemaphore:
     redis_retry_multiplier: float = 2
     redis_retry_max_delay: float = 60
 
-    _pool_acquire: RedisConnectionPool
-    _pool_release: RedisConnectionPool
-    _pool_pubsub: RedisConnectionPool
-    _max_wait_time: int
+    _acquire_client: Redis
+    _release_client: Redis
+    _acquire_script: Any
+    _release_script: Any
+
+    _max_wait_time: int = 1
     __client_id: str | None = None
     __entered: bool = False
 
-    def _get_channel(self) -> str:
-        return f"{self.namespace}:rate_limiter:channel:{self.key}"
+    def _get_list(self) -> str:
+        return f"{self.namespace}:rate_limiter:list:{self.key}"
 
     def _get_zset_key(self) -> str:
         return f"{self.namespace}:rate_limiter:zset:{self.key}"
@@ -79,43 +82,41 @@ with manager.get_semaphore("test", 1):
         client_id = str(uuid.uuid4()).replace("-", "")
         async for attempt in self._async_retrying():
             with attempt:
-                async with await self._pool_acquire.context_manager() as client:
-                    acquire_script = client.register_script(ACQUIRE_LUA_SCRIPT)
-                    async with (
-                        await self._pool_pubsub.context_manager() as pubsub_client
-                    ):
-                        async with pubsub_client.pubsub() as pubsub:
-                            # Subscribe to the channel
-                            await pubsub.subscribe(self._get_channel())
+                # Try to get the lock
+                while True:
+                    now = time.time()
+                    acquired = await self._acquire_script(
+                        keys=[self._get_zset_key()],
+                        args=[
+                            client_id,
+                            self.value,
+                            self.ttl,
+                            now,
+                        ],
+                    )
+                    if acquired == 1:
+                        self.__client_id = client_id
+                        return None
 
-                            # Try to get the lock
-                            while True:
-                                now = time.time()
-                                acquired = await acquire_script(
-                                    keys=[self._get_zset_key()],
-                                    args=[
-                                        self._get_channel(),
-                                        client_id,
-                                        self.value,
-                                        self.ttl,
-                                        now,
-                                    ],
-                                )
-                                if acquired == 1:
-                                    self.__client_id = client_id
-                                    await pubsub.unsubscribe(self._get_channel())
-                                    return None
-
-                                # Wait for notification using pubsub
-                                await pubsub.get_message(timeout=self._max_wait_time)
+                    # Wait for notification
+                    while True:
+                        res = await self._acquire_client.blpop(  # type: ignore
+                            [self._get_list()], self._max_wait_time
+                        )
+                        if res is not None:
+                            expire_at = float(res[1])
+                            if expire_at < now:
+                                # this is an old notification => let's pop another one
+                                continue
+                        # we timeouted or popped a recent notification => let's try again to get the lock
+                        break
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         assert self.__client_id is not None
         async for attempt in self._async_retrying():
             with attempt:
-                async with await self._pool_release.context_manager() as client:
-                    release_script = client.register_script(RELEASE_LUA_SCRIPT)
-                    await release_script(
-                        keys=[self._get_zset_key()],
-                        args=[self._get_channel(), self.__client_id, self.ttl],
-                    )
+                now = time.time()
+                await self._release_script(
+                    keys=[self._get_zset_key(), self._get_list()],
+                    args=[self.__client_id, self.value, self.ttl, now],
+                )
