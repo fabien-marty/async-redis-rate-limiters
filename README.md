@@ -50,6 +50,7 @@ async def main():
     manager = DistributedSemaphoreManager(
         redis_url="redis://localhost:6379",
         redis_max_connections=100,
+        redis_ttl=3600,  # semaphore max duration (seconds)
     )
     # Limit the concurrency to 10 concurrent tasks for the key "test"
     semaphore = manager.get_semaphore("test", 10)

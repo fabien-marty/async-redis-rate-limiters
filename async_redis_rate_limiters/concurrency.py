@@ -67,30 +67,30 @@ class DistributedSemaphoreManager:
             raise ValueError(
                 "redis_socket_timeout must be greater than _blocking_wait_time"
             )
-        Redis()
-        self.__acquire_pool = BlockingConnectionPool.from_url(
-            self.redis_url,
-            max_connections=self.redis_max_connections // 2,
-            timeout=None,
-            retry_on_timeout=False,
-            retry_on_error=False,
-            health_check_interval=10,
-            socket_connect_timeout=self.redis_socket_connect_timeout,
-            socket_timeout=self.redis_socket_timeout,
-        )
-        self.__release_pool = BlockingConnectionPool.from_url(
-            self.redis_url,
-            max_connections=self.redis_max_connections // 2,
-            timeout=None,
-        )
-        self.__acquire_client = Redis.from_pool(self.__acquire_pool)
-        self.__release_client = Redis.from_pool(self.__release_pool)
-        self.__acquire_script = self.__acquire_client.register_script(
-            ACQUIRE_LUA_SCRIPT
-        )
-        self.__release_script = self.__release_client.register_script(
-            RELEASE_LUA_SCRIPT
-        )
+        if self.backend == "redis":
+            self.__acquire_pool = BlockingConnectionPool.from_url(
+                self.redis_url,
+                max_connections=self.redis_max_connections // 2,
+                timeout=None,
+                retry_on_timeout=False,
+                retry_on_error=False,
+                health_check_interval=10,
+                socket_connect_timeout=self.redis_socket_connect_timeout,
+                socket_timeout=self.redis_socket_timeout,
+            )
+            self.__release_pool = BlockingConnectionPool.from_url(
+                self.redis_url,
+                max_connections=self.redis_max_connections // 2,
+                timeout=None,
+            )
+            self.__acquire_client = Redis.from_pool(self.__acquire_pool)
+            self.__release_client = Redis.from_pool(self.__release_pool)
+            self.__acquire_script = self.__acquire_client.register_script(
+                ACQUIRE_LUA_SCRIPT
+            )
+            self.__release_script = self.__release_client.register_script(
+                RELEASE_LUA_SCRIPT
+            )
 
     def _get_redis_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
         assert self.__acquire_client is not None
