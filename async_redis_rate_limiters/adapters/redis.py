@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -30,6 +31,7 @@ class _RedisDistributedSemaphore:
     _release_client: Redis
     _acquire_script: Any
     _release_script: Any
+    _local_semaphore: asyncio.Semaphore
 
     _max_wait_time: int = 1
     __client_id: str | None = None
@@ -54,6 +56,7 @@ class _RedisDistributedSemaphore:
         )
 
     async def __aenter__(self) -> None:
+        assert self._local_semaphore is not None
         if self.__entered:
             print("""BAD USAGE:
 DON'T DO THIS:
@@ -80,6 +83,7 @@ with manager.get_semaphore("test", 1):
             )
         self.__entered = True
         client_id = str(uuid.uuid4()).replace("-", "")
+        await self._local_semaphore.acquire()
         async for attempt in self._async_retrying():
             with attempt:
                 # Try to get the lock
@@ -113,10 +117,14 @@ with manager.get_semaphore("test", 1):
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         assert self.__client_id is not None
-        async for attempt in self._async_retrying():
-            with attempt:
-                now = time.time()
-                await self._release_script(
-                    keys=[self._get_zset_key(), self._get_list()],
-                    args=[self.__client_id, self.value, self.ttl, now],
-                )
+        assert self._local_semaphore is not None
+        try:
+            async for attempt in self._async_retrying():
+                with attempt:
+                    now = time.time()
+                    await self._release_script(
+                        keys=[self._get_zset_key(), self._get_list()],
+                        args=[self.__client_id, self.value, self.ttl, now],
+                    )
+        finally:
+            self._local_semaphore.release()
