@@ -115,7 +115,9 @@ with manager.get_semaphore("test", 1):
                         # we timeouted or popped a recent notification => let's try again to get the lock
                         break
 
-    async def __aexit__(self, exc_type, exc_value, traceback):
+    async def __release(self) -> None:
+        """Release logic, must be called with a shild to protected
+        the code to be cancelled in the middle of the release."""
         assert self.__client_id is not None
         assert self._local_semaphore is not None
         try:
@@ -128,3 +130,6 @@ with manager.get_semaphore("test", 1):
                     )
         finally:
             self._local_semaphore.release()
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        await asyncio.shield(self.__release())
