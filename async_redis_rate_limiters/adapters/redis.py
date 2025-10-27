@@ -36,6 +36,7 @@ class _RedisDistributedSemaphore:
     _max_wait_time: int = 1
     __client_id: str | None = None
     __entered: bool = False
+    __local_acquired: bool = False
 
     def _get_list(self) -> str:
         return f"{self.namespace}:rate_limiter:list:{self.key}"
@@ -54,6 +55,24 @@ class _RedisDistributedSemaphore:
             retry=retry_if_exception_type(),
             reraise=True,
         )
+
+    async def __local_acquire(self):
+        self.__local_acquired = await self._local_semaphore.acquire()
+
+    async def __acquire(self, client_id: str, now: float) -> bool:
+        acquired = await self._acquire_script(
+            keys=[self._get_zset_key()],
+            args=[
+                client_id,
+                self.value,
+                self.ttl,
+                now,
+            ],
+        )
+        if acquired == 1:
+            self.__client_id = client_id
+            return True
+        return False
 
     async def __aenter__(self) -> None:
         assert self._local_semaphore is not None
@@ -83,28 +102,16 @@ with manager.get_semaphore("test", 1):
             )
         self.__entered = True
         client_id = str(uuid.uuid4()).replace("-", "")
-        local_acquired = False
-        acquired = 0
         try:
-            local_acquired = await self._local_semaphore.acquire()
+            await asyncio.shield(self.__local_acquire())
             async for attempt in self._async_retrying():
                 with attempt:
                     # Try to get the lock
                     while True:
                         now = time.time()
-                        acquired = await self._acquire_script(
-                            keys=[self._get_zset_key()],
-                            args=[
-                                client_id,
-                                self.value,
-                                self.ttl,
-                                now,
-                            ],
-                        )
-                        if acquired == 1:
-                            self.__client_id = client_id
-                            return None
-
+                        acquired = await asyncio.shield(self.__acquire(client_id, now))
+                        if acquired:
+                            return
                         # Wait for notification
                         while True:
                             res = await self._acquire_client.blpop(  # type: ignore
@@ -122,10 +129,10 @@ with manager.get_semaphore("test", 1):
             # we have to clean all acquired resources here
             # before re-raising the exception
             try:
-                if acquired:
-                    await asyncio.shield(self.__release(client_id))
+                if self.__client_id is not None:
+                    await asyncio.shield(self.__release(self.__client_id))
             finally:
-                if local_acquired:
+                if self.__local_acquired:
                     self._local_semaphore.release()
             raise
 
