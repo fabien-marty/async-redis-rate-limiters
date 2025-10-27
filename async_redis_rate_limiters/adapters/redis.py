@@ -83,39 +83,53 @@ with manager.get_semaphore("test", 1):
             )
         self.__entered = True
         client_id = str(uuid.uuid4()).replace("-", "")
-        await self._local_semaphore.acquire()
-        async for attempt in self._async_retrying():
-            with attempt:
-                # Try to get the lock
-                while True:
-                    now = time.time()
-                    acquired = await self._acquire_script(
-                        keys=[self._get_zset_key()],
-                        args=[
-                            client_id,
-                            self.value,
-                            self.ttl,
-                            now,
-                        ],
-                    )
-                    if acquired == 1:
-                        self.__client_id = client_id
-                        return None
-
-                    # Wait for notification
+        local_acquired = False
+        acquired = 0
+        try:
+            local_acquired = await self._local_semaphore.acquire()
+            async for attempt in self._async_retrying():
+                with attempt:
+                    # Try to get the lock
                     while True:
-                        res = await self._acquire_client.blpop(  # type: ignore
-                            [self._get_list()], self._max_wait_time
+                        now = time.time()
+                        acquired = await self._acquire_script(
+                            keys=[self._get_zset_key()],
+                            args=[
+                                client_id,
+                                self.value,
+                                self.ttl,
+                                now,
+                            ],
                         )
-                        if res is not None:
-                            expire_at = float(res[1])
-                            if expire_at < now:
-                                # this is an old notification => let's pop another one
-                                continue
-                        # we timeouted or popped a recent notification => let's try again to get the lock
-                        break
+                        if acquired == 1:
+                            self.__client_id = client_id
+                            return None
 
-    async def __release(self) -> None:
+                        # Wait for notification
+                        while True:
+                            res = await self._acquire_client.blpop(  # type: ignore
+                                [self._get_list()], self._max_wait_time
+                            )
+                            if res is not None:
+                                expire_at = float(res[1])
+                                if expire_at < now:
+                                    # this is an old notification => let's pop another one
+                                    continue
+                            # we timeouted or popped a recent notification => let's try again to get the lock
+                            break
+        except BaseException:
+            # note: catch any exception here (including asyncio.CancelledError)
+            # we have to clean all acquired resources here
+            # before re-raising the exception
+            try:
+                if acquired:
+                    await asyncio.shield(self.__release(client_id))
+            finally:
+                if local_acquired:
+                    self._local_semaphore.release()
+            raise
+
+    async def __release(self, client_id: str) -> None:
         """Release logic, must be called with a shild to protected
         the code to be cancelled in the middle of the release."""
         assert self.__client_id is not None
@@ -126,10 +140,11 @@ with manager.get_semaphore("test", 1):
                     now = time.time()
                     await self._release_script(
                         keys=[self._get_zset_key(), self._get_list()],
-                        args=[self.__client_id, self.value, self.ttl, now],
+                        args=[client_id, self.value, self.ttl, now],
                     )
         finally:
             self._local_semaphore.release()
 
     async def __aexit__(self, exc_type, exc_value, traceback):
-        await asyncio.shield(self.__release())
+        if self.__client_id is not None:
+            await asyncio.shield(self.__release(self.__client_id))
