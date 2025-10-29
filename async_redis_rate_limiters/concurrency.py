@@ -49,8 +49,7 @@ class DistributedSemaphoreManager:
     """Maximum delay between Redis operations (seconds)."""
 
     __blocking_wait_time: int = 10
-    _redis_memory_semaphore_helper: MemorySemaphoreHelper | None = None
-    _memory_memory_semaphore_helper: MemorySemaphoreHelper | None = None
+    _memory_semaphore_helper: MemorySemaphoreHelper | None = None
     __acquire_pool: BlockingConnectionPool | None = None
     __release_pool: BlockingConnectionPool | None = None
     __acquire_client: Redis | None = None
@@ -89,11 +88,7 @@ class DistributedSemaphoreManager:
             self.__release_script = self.__release_client.register_script(
                 RELEASE_LUA_SCRIPT
             )
-        self._redis_memory_semaphore_helper = MemorySemaphoreHelper(
-            namespace=self.namespace,
-            ttl=self.redis_ttl,
-        )
-        self._memory_memory_semaphore_helper = MemorySemaphoreHelper(
+        self._memory_semaphore_helper = MemorySemaphoreHelper(
             namespace=self.namespace,
             ttl=None,
         )
@@ -101,7 +96,6 @@ class DistributedSemaphoreManager:
     def _get_redis_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
         assert self.__acquire_client is not None
         assert self.__release_client is not None
-        assert self._redis_memory_semaphore_helper is not None
         return _RedisDistributedSemaphore(
             namespace=self.namespace,
             redis_url=self.redis_url,
@@ -116,15 +110,11 @@ class DistributedSemaphoreManager:
             _release_client=self.__release_client,
             _acquire_script=self.__acquire_script,
             _release_script=self.__release_script,
-            _local_semaphore=self._redis_memory_semaphore_helper.get_semaphore(
-                key=key,
-                value=value,
-            ),
         )
 
     def _get_memory_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
-        assert self._memory_memory_semaphore_helper is not None
-        return self._memory_memory_semaphore_helper.get_semaphore(key, value)
+        assert self._memory_semaphore_helper is not None
+        return self._memory_semaphore_helper.get_semaphore(key, value)
 
     def get_semaphore(self, key: str, value: int) -> AsyncContextManager[None]:
         """Get a distributed semaphore for the given key (with the given value)."""

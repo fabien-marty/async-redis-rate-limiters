@@ -1,12 +1,11 @@
 # async-redis-rate-limiters
 
-![Python Badge](https://raw.githubusercontent.com/fabien-marty/common/refs/heads/main/badges/python310plus.svg)
 [![UV Badge](https://raw.githubusercontent.com/fabien-marty/common/refs/heads/main/badges/uv.svg)](https://docs.astral.sh/uv/)
 [![Mergify Badge](https://raw.githubusercontent.com/fabien-marty/common/refs/heads/main/badges/mergify.svg)](https://mergify.com/)
 [![Renovate Badge](https://raw.githubusercontent.com/fabien-marty/common/refs/heads/main/badges/renovate.svg)](https://docs.renovatebot.com/)
 [![MIT Licensed](https://raw.githubusercontent.com/fabien-marty/common/refs/heads/main/badges/mit.svg)](https://en.wikipedia.org/wiki/MIT_License)
 
-Rock solid async python generic distributed rate limiters (concurrency and time) backed by Redis.
+Rock solid async python (3.13+) generic distributed rate limiters (concurrency and time) backed by Redis.
 
 > [!WARNING]  
 > This is a very preliminary version of the library and only concurrency limiters are available for now.
