@@ -145,7 +145,6 @@ with manager.get_semaphore("test", 1):
     async def __release(self, client_id: str) -> None:
         """Release logic, must be called with a shild to protected
         the code to be cancelled in the middle of the release."""
-        assert self.__client_id is not None
         async for attempt in self._async_retrying():
             with attempt:
                 now = time.time()
