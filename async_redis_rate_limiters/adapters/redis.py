@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+import logging
 import time
 from typing import Any
 import uuid
@@ -12,6 +13,27 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+
+
+async def _super_shield(task: asyncio.Task, timeout: float = 10.0) -> None:
+    """This function completly shields the given task against cancellations.
+
+    It waits for the task to be completed up to the given timeout and completely
+    ignore any cancellation error in this interval.
+
+    """
+    before = time.perf_counter()
+    while True:
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.shield(task)
+            break
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if time.perf_counter() - before > timeout:
+                logging.warning(
+                    "super_shield: failed to end the shielded task within the timeout"
+                )
+                break
 
 
 @dataclass(kw_only=True)
@@ -31,12 +53,10 @@ class _RedisDistributedSemaphore:
     _release_client: Redis
     _acquire_script: Any
     _release_script: Any
-    _local_semaphore: asyncio.Semaphore
 
     _max_wait_time: int = 1
     __client_id: str | None = None
     __entered: bool = False
-    __local_acquired: bool = False
 
     def _get_list(self) -> str:
         return f"{self.namespace}:rate_limiter:list:{self.key}"
@@ -56,26 +76,7 @@ class _RedisDistributedSemaphore:
             reraise=True,
         )
 
-    async def __local_acquire(self):
-        self.__local_acquired = await self._local_semaphore.acquire()
-
-    async def __acquire(self, client_id: str, now: float) -> bool:
-        acquired = await self._acquire_script(
-            keys=[self._get_zset_key()],
-            args=[
-                client_id,
-                self.value,
-                self.ttl,
-                now,
-            ],
-        )
-        if acquired == 1:
-            self.__client_id = client_id
-            return True
-        return False
-
     async def __aenter__(self) -> None:
-        assert self._local_semaphore is not None
         if self.__entered:
             print("""BAD USAGE:
 DON'T DO THIS:
@@ -103,14 +104,22 @@ with manager.get_semaphore("test", 1):
         self.__entered = True
         client_id = str(uuid.uuid4()).replace("-", "")
         try:
-            await asyncio.shield(self.__local_acquire())
             async for attempt in self._async_retrying():
                 with attempt:
                     # Try to get the lock
                     while True:
                         now = time.time()
-                        acquired = await asyncio.shield(self.__acquire(client_id, now))
-                        if acquired:
+                        acquired = await self._acquire_script(
+                            keys=[self._get_zset_key()],
+                            args=[
+                                client_id,
+                                self.value,
+                                self.ttl,
+                                now,
+                            ],
+                        )
+                        if acquired == 1:
+                            self.__client_id = client_id
                             return
                         # Wait for notification
                         while True:
@@ -128,30 +137,24 @@ with manager.get_semaphore("test", 1):
             # note: catch any exception here (including asyncio.CancelledError)
             # we have to clean all acquired resources here
             # before re-raising the exception
-            try:
-                if self.__client_id is not None:
-                    await asyncio.shield(self.__release(self.__client_id))
-            finally:
-                if self.__local_acquired:
-                    self._local_semaphore.release()
+            # This is very important to avoid leaking semaphores!
+            task = asyncio.create_task(self.__release(client_id))
+            await _super_shield(task)
             raise
 
     async def __release(self, client_id: str) -> None:
         """Release logic, must be called with a shild to protected
         the code to be cancelled in the middle of the release."""
         assert self.__client_id is not None
-        assert self._local_semaphore is not None
-        try:
-            async for attempt in self._async_retrying():
-                with attempt:
-                    now = time.time()
-                    await self._release_script(
-                        keys=[self._get_zset_key(), self._get_list()],
-                        args=[client_id, self.value, self.ttl, now],
-                    )
-        finally:
-            self._local_semaphore.release()
+        async for attempt in self._async_retrying():
+            with attempt:
+                now = time.time()
+                await self._release_script(
+                    keys=[self._get_zset_key(), self._get_list()],
+                    args=[client_id, self.value, self.ttl, now],
+                )
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         if self.__client_id is not None:
-            await asyncio.shield(self.__release(self.__client_id))
+            task = asyncio.create_task(self.__release(self.__client_id))
+            await _super_shield(task)
