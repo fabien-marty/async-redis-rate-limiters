@@ -70,7 +70,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Build
         run: |
           make build
