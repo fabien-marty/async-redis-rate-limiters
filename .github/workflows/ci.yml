@@ -20,7 +20,7 @@ jobs:
         python-version: ["3.13", "3.14"]
     services:
       redis: # some unit-tests are requiring a running redis instance
-        image: redis:8.0@sha256:f957ce918b51f3ac10414244bedd0043c47db44a819f98b9902af1bd9d0afcea
+        image: redis:8.10@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee
         ports:
           - 6379:6379
     env:
